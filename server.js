@@ -11,7 +11,6 @@ app.use(express.json());
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const QUIZ_TABLE = 'Quiz';   // change if yours is called something else
-const VOTES_TABLE = 'Votes'; // change if yours is called something else
 
 // Helper: call Airtable
 async function airtableFetch(path, options = {}) {
@@ -44,7 +43,7 @@ app.get('/questions', async (req, res) => {
   }
 });
 
-// 2) GET /results/:num => show question + answer texts + which is correct + how many votes each answer got
+// 2) GET /results/:num => read the rollup fields for each answer’s vote count
 app.get('/results/:num', async (req, res) => {
   try {
     const questionNum = req.params.num;
@@ -55,27 +54,13 @@ app.get('/results/:num', async (req, res) => {
     if (!quizData.records || !quizData.records.length) {
       return res.status(404).json({ error: 'Question not found' });
     }
+
     const quizRecord = quizData.records[0];
     const qFields = quizRecord.fields;
-    const questionId = quizRecord.id;
 
-    // Now fetch votes for that question record
-    // If the "Question" field in Votes is a linked record, we can search:
-    const votesFilter = encodeURIComponent(`SEARCH("${questionId}", ARRAYJOIN({Question}))`);
-    const votesData = await airtableFetch(`${VOTES_TABLE}?filterByFormula=${votesFilter}`);
-
-    // Tally votes in an object
-    const counts = { '1': 0, '2': 0, '3': 0, '4': 0 };
-    (votesData.records || []).forEach(v => {
-      const voteVal = v.fields['Vote'];
-      if (counts[voteVal] !== undefined) {
-        counts[voteVal]++;
-      }
-    });
-
-    // Return final JSON
+    // Return final JSON with rollup fields for each answer’s votes
     res.json({
-      questionNumber: qFields['Question Number'],
+      questionNumber: qFields['Question Number'] || 0,
       question: qFields['Question'] || '',
       answers: {
         '1': qFields['Answer 1'] || '',
@@ -84,7 +69,12 @@ app.get('/results/:num', async (req, res) => {
         '4': qFields['Answer 4'] || ''
       },
       correctAnswer: qFields['Correct Answer'] || '',
-      votes: counts
+      votes: {
+        '1': qFields['a1 Votes'] || 0,
+        '2': qFields['a2 Votes'] || 0,
+        '3': qFields['a3 Votes'] || 0,
+        '4': qFields['a4 Votes'] || 0
+      }
     });
   } catch (error) {
     console.error('Error in GET /results/:num:', error);
