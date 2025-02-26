@@ -1,18 +1,20 @@
 // server.js
 const express = require('express');
 const cors = require('cors');
-const fetch = require('node-fetch'); // for Node v14–16 or node-fetch@2
-require('dotenv').config(); // so we can use .env locally
+const fetch = require('node-fetch'); // for Node <=16 or node-fetch@2
+require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Config Vars
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
-const QUIZ_TABLE = 'Quiz';   // change if yours is called something else
+const QUIZ_TABLE = 'Quiz';
+const VOTES_TABLE = 'Votes';
 
-// Helper: call Airtable
+// Helper to call Airtable
 async function airtableFetch(path, options = {}) {
   const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${path}`;
   const resp = await fetch(url, {
@@ -30,60 +32,77 @@ async function airtableFetch(path, options = {}) {
   return data;
 }
 
-// 1) GET /questions => list all questions sorted by Question Number
-app.get('/questions', async (req, res) => {
+/**
+ * GET /active
+ * Returns the first Quiz record where {Active Question} is true
+ */
+app.get('/active', async (req, res) => {
   try {
-    const data = await airtableFetch(
-      `${QUIZ_TABLE}?sort[0][field]=Question%20Number&sort[0][direction]=asc`
-    );
-    res.json(data.records);
-  } catch (error) {
-    console.error('Error in GET /questions:', error);
-    res.status(500).json({ error: error.message });
+    // If your checkbox is named exactly "Active Question", you can do:
+    // filterByFormula={Active Question} = TRUE()
+    const filter = encodeURIComponent('{Active Question} = TRUE()');
+    const data = await airtableFetch(`${QUIZ_TABLE}?filterByFormula=${filter}`);
+
+    if (!data.records || !data.records.length) {
+      // No active question => return an empty object
+      return res.json({ active: false });
+    }
+    const record = data.records[0];
+    res.json({
+      active: true,
+      questionId: record.id,
+      fields: record.fields
+    });
+  } catch (err) {
+    console.error('Error in GET /active:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 2) GET /results/:num => read the rollup fields for each answer’s vote count
-app.get('/results/:num', async (req, res) => {
+/**
+ * POST /vote
+ * Expects JSON { voterName, questionId, answerNumber }
+ * Creates a new record in "Votes"
+ */
+app.post('/vote', async (req, res) => {
   try {
-    const questionNum = req.params.num;
-
-    // Find the question record by {Question Number} = questionNum
-    const filterFormula = encodeURIComponent(`{Question Number} = ${questionNum}`);
-    const quizData = await airtableFetch(`${QUIZ_TABLE}?filterByFormula=${filterFormula}`);
-    if (!quizData.records || !quizData.records.length) {
-      return res.status(404).json({ error: 'Question not found' });
+    const { voterName, questionId, answerNumber } = req.body;
+    if (!voterName || !questionId || !answerNumber) {
+      return res.status(400).json({ error: 'Missing fields' });
     }
 
-    const quizRecord = quizData.records[0];
-    const qFields = quizRecord.fields;
+    // Create a new record in Votes
+    // "Question" is a linked field referencing the Quiz record (by ID)
+    // "Voter Name" is text, "Vote" is 1–4
+    const postBody = {
+      records: [
+        {
+          fields: {
+            'Voter Name': voterName,
+            'Question': [questionId],  // link array
+            'Vote': answerNumber.toString() // e.g., "1", "2", etc.
+          }
+        }
+      ]
+    };
 
-    // Return final JSON with rollup fields for each answer’s votes
-    res.json({
-      questionNumber: qFields['Question Number'] || 0,
-      question: qFields['Question'] || '',
-      answers: {
-        '1': qFields['Answer 1'] || '',
-        '2': qFields['Answer 2'] || '',
-        '3': qFields['Answer 3'] || '',
-        '4': qFields['Answer 4'] || ''
-      },
-      correctAnswer: qFields['Correct Answer'] || '',
-      votes: {
-        '1': qFields['a1 Votes'] || 0,
-        '2': qFields['a2 Votes'] || 0,
-        '3': qFields['a3 Votes'] || 0,
-        '4': qFields['a4 Votes'] || 0
-      }
+    const result = await airtableFetch(VOTES_TABLE, {
+      method: 'POST',
+      body: JSON.stringify(postBody)
     });
-  } catch (error) {
-    console.error('Error in GET /results/:num:', error);
-    res.status(500).json({ error: error.message });
+
+    // Return the new record
+    res.json({ success: true, voteRecord: result.records[0] });
+  } catch (err) {
+    console.error('Error in POST /vote:', err);
+    res.status(500).json({ error: err.message });
   }
 });
+
+// Example: We might also have other endpoints, but omitted for brevity
 
 // Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Quiz server listening on port ${PORT}`);
+  console.log(`Server listening on port ${PORT}`);
 });
