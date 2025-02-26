@@ -2,71 +2,110 @@
 const express = require('express');
 const fetch = require('node-fetch');
 const cors = require('cors');
-require('dotenv').config(); // lets us read .env locally (not needed on Heroku)
 
+// Log basic info about env vars (true/false instead of printing secret)
+console.log("Has AIRTABLE_API_KEY?", !!process.env.AIRTABLE_API_KEY);
+console.log("Has AIRTABLE_BASE_ID?", !!process.env.AIRTABLE_BASE_ID);
+console.log("Has AIRTABLE_TABLE_NAME?", !!process.env.AIRTABLE_TABLE_NAME);
+
+// Standard config
 const app = express();
 app.use(cors());
-app.use(express.json()); // so we can parse JSON in POST/PUT bodies
+app.use(express.json());
 
-// Read environment vars (on Heroku, from Config Vars; locally, from .env)
+// Read environment vars
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Quiz';
 const AIRTABLE_URL = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${AIRTABLE_TABLE_NAME}`;
 
-// 1) GET /active : returns the currently "Active Question"
+// GET /active
 app.get('/active', async (req, res) => {
   try {
-    const response = await fetch(`${AIRTABLE_URL}?filterByFormula={Active Question}`, {
+    console.log("Received GET /active");
+    // Filter for records where {Active Question} is checked
+    // If your checkbox formula in Airtable requires =TRUE(), try:
+    // const filterFormula = encodeURIComponent('{Active Question} = TRUE()');
+    const filterFormula = encodeURIComponent('{Active Question}');
+    const url = `${AIRTABLE_URL}?filterByFormula=${filterFormula}`;
+
+    console.log("Fetching from Airtable:", url);
+    const response = await fetch(url, {
       headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` },
     });
     const data = await response.json();
-    if (!data.records.length) {
+
+    if (data.error) {
+      // If Airtable returns an error object
+      console.error("Airtable responded with an error:", data.error);
+      return res.status(500).json({ error: data.error });
+    }
+    if (!data.records || !data.records.length) {
+      console.log("No active question found!");
       return res.json({ error: 'No active question found' });
     }
-    // Return the first matching record
+
     const record = data.records[0];
+    console.log("Found active question record:", record.id);
     res.json(record);
   } catch (error) {
+    console.error("Error in GET /active:", error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// 2) POST /next : unchecks the current active question and sets the next question as active
+// POST /next
 app.post('/next', async (req, res) => {
   try {
-    // 2A) Find the current active question
-    const currentResponse = await fetch(`${AIRTABLE_URL}?filterByFormula={Active Question}`, {
+    console.log("Received POST /next");
+    // 1) Find the current active question
+    const filterFormula = encodeURIComponent('{Active Question}');
+    const currentResponse = await fetch(`${AIRTABLE_URL}?filterByFormula=${filterFormula}`, {
       headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` },
     });
     const currentData = await currentResponse.json();
-    // Uncheck the current active question
-    const updates = [];
-    for (let rec of currentData.records) {
-      updates.push({
-        id: rec.id,
-        fields: { 'Active Question': false },
-      });
+
+    if (currentData.error) {
+      console.error("Airtable responded with an error (currentData):", currentData.error);
+      return res.status(500).json({ error: currentData.error });
     }
 
-    // 2B) Find *all* quiz records. We'll just pick the next in line for example:
-    // In real usage, you might store an "Order" or "Sequence" field. For simplicity, we pick any question that isn't active and update the first one.
-    const allResponse = await fetch(`${AIRTABLE_URL}`, {
+    // Prepare batch to uncheck current active
+    const updates = [];
+    if (currentData.records && currentData.records.length) {
+      for (let rec of currentData.records) {
+        updates.push({
+          id: rec.id,
+          fields: { 'Active Question': false },
+        });
+      }
+    }
+
+    // 2) Find all quiz records
+    const allResponse = await fetch(AIRTABLE_URL, {
       headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` },
     });
     const allData = await allResponse.json();
-    // Find a record that is not active
+
+    if (allData.error) {
+      console.error("Airtable responded with an error (allData):", allData.error);
+      return res.status(500).json({ error: allData.error });
+    }
+
+    // 3) Pick the first record that is not active to be the new active
     const nextRecord = allData.records.find(r => !r.fields['Active Question']);
     if (nextRecord) {
       updates.push({
         id: nextRecord.id,
         fields: { 'Active Question': true },
       });
+      console.log("Will set next record active:", nextRecord.id);
     }
 
-    // 2C) Perform the batch update
+    // 4) Perform the batch update if there's anything to update
     if (updates.length > 0) {
-      await fetch(AIRTABLE_URL, {
+      console.log("Sending PATCH to Airtable:", updates);
+      const patchResponse = await fetch(AIRTABLE_URL, {
         method: 'PATCH',
         headers: {
           Authorization: `Bearer ${AIRTABLE_API_KEY}`,
@@ -74,15 +113,23 @@ app.post('/next', async (req, res) => {
         },
         body: JSON.stringify({ records: updates }),
       });
+      const patchData = await patchResponse.json();
+      if (patchData.error) {
+        console.error("Airtable responded with an error (patchData):", patchData.error);
+        return res.status(500).json({ error: patchData.error });
+      }
+    } else {
+      console.log("No records found to update!");
     }
 
-    // Return the new “Active Question” record
+    // Return success
     if (nextRecord) {
       res.json({ newActive: nextRecord.id });
     } else {
       res.json({ message: 'No next question found' });
     }
   } catch (error) {
+    console.error("Error in POST /next:", error);
     res.status(500).json({ error: error.message });
   }
 });
