@@ -1,4 +1,7 @@
-// server.js
+// The code below merges your existing /active and /vote routes with a missing /questions route.
+// Place this in your server.js, commit, and deploy to Heroku.
+// This way, the Controller can fetch all questions by question number, and the Player can fetch the active one.
+
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch'); // for Node <=16 or node-fetch@2
@@ -33,18 +36,35 @@ async function airtableFetch(path, options = {}) {
 }
 
 /**
+ * GET /questions
+ * Returns all questions sorted by Question Number.
+ * The Controller uses this to load the entire quiz.
+ */
+app.get('/questions', async (req, res) => {
+  try {
+    // Sort by the numeric field "Question Number" ascending
+    const data = await airtableFetch(`${QUIZ_TABLE}?sort[0][field]=Question%20Number&sort[0][direction]=asc`);
+    res.json(data.records);
+  } catch (err) {
+    console.error('Error in GET /questions:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * GET /active
- * Returns the first Quiz record where {Active Question} is true
+ * Returns the first Quiz record where {Active Question} is true.
+ * The Player uses this to see which question is live.
  */
 app.get('/active', async (req, res) => {
   try {
-    // If your checkbox is named exactly "Active Question", you can do:
-    // filterByFormula={Active Question} = TRUE()
+    // If your checkbox is named exactly "Active Question",
+    // you can do filterByFormula={Active Question} = TRUE()
     const filter = encodeURIComponent('{Active Question} = TRUE()');
     const data = await airtableFetch(`${QUIZ_TABLE}?filterByFormula=${filter}`);
 
     if (!data.records || !data.records.length) {
-      // No active question => return an empty object
+      // No active question => return an object with active:false
       return res.json({ active: false });
     }
     const record = data.records[0];
@@ -79,8 +99,8 @@ app.post('/vote', async (req, res) => {
         {
           fields: {
             'Voter Name': voterName,
-            'Question': [questionId],  // link array
-            'Vote': answerNumber.toString() // e.g., "1", "2", etc.
+            'Question': [questionId],
+            'Vote': answerNumber.toString()
           }
         }
       ]
@@ -98,8 +118,6 @@ app.post('/vote', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-// Example: We might also have other endpoints, but omitted for brevity
 
 // Start server
 const PORT = process.env.PORT || 3000;
