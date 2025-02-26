@@ -1,143 +1,117 @@
 // server.js
 const express = require('express');
-// IMPORTANT: Use the .default import if using node-fetch v3. For v2, it's simply require('node-fetch'):
-const fetch = require('node-fetch'); // For node-fetch v2
 const cors = require('cors');
+const fetch = require('node-fetch'); // For node-fetch v2
+require('dotenv').config(); // So we can use .env locally (Heroku uses Config Vars)
 
+// Read env vars
+const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
+const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
+const QUIZ_TABLE = 'Quiz';
+const VOTES_TABLE = 'Votes';
 
-// Log basic info about env vars (true/false instead of printing secret)
-console.log("Has AIRTABLE_API_KEY?", !!process.env.AIRTABLE_API_KEY);
-console.log("Has AIRTABLE_BASE_ID?", !!process.env.AIRTABLE_BASE_ID);
-console.log("Has AIRTABLE_TABLE_NAME?", !!process.env.AIRTABLE_TABLE_NAME);
-
-// Standard config
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Read environment vars
-const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
-const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
-const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Quiz';
-const AIRTABLE_URL = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${AIRTABLE_TABLE_NAME}`;
-
-// GET /active
-app.get('/active', async (req, res) => {
-  try {
-    console.log("Received GET /active");
-    // Filter for records where {Active Question} is checked
-    // If your checkbox formula in Airtable requires =TRUE(), try:
-    // const filterFormula = encodeURIComponent('{Active Question} = TRUE()');
-    const filterFormula = encodeURIComponent('{Active Question}');
-    const url = `${AIRTABLE_URL}?filterByFormula=${filterFormula}`;
-
-    console.log("Fetching from Airtable:", url);
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` },
-    });
-    const data = await response.json();
-
-    if (data.error) {
-      // If Airtable returns an error object
-      console.error("Airtable responded with an error:", data.error);
-      return res.status(500).json({ error: data.error });
+// Helper to call Airtable
+async function airtableFetch(path, options = {}) {
+  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${path}`;
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${AIRTABLE_API_KEY}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
     }
+  });
+  const data = await res.json();
+  if (data.error) {
+    throw new Error(`Airtable error: ${JSON.stringify(data.error)}`);
+  }
+  return data;
+}
+
+// 1) GET /questions → Returns all questions sorted by Question Number
+app.get('/questions', async (req, res) => {
+  try {
+    // Sort by Question Number ascending
+    const data = await airtableFetch(`${QUIZ_TABLE}?sort[0][field]=Question%20Number&sort[0][direction]=asc`);
+    res.json(data.records);
+  } catch (error) {
+    console.error('Error in GET /questions:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 2) GET /question/:num → Returns a single question by Question Number
+app.get('/question/:num', async (req, res) => {
+  try {
+    const questionNum = req.params.num;
+    // Filter for records where {Question Number} = questionNum
+    const filterFormula = encodeURIComponent(`{Question Number} = ${questionNum}`);
+    const data = await airtableFetch(`${QUIZ_TABLE}?filterByFormula=${filterFormula}`);
     if (!data.records || !data.records.length) {
-      console.log("No active question found!");
-      return res.json({ error: 'No active question found' });
+      return res.status(404).json({ error: 'Question not found' });
     }
-
-    const record = data.records[0];
-    console.log("Found active question record:", record.id);
-    res.json(record);
+    res.json(data.records[0]); 
   } catch (error) {
-    console.error("Error in GET /active:", error);
+    console.error('Error in GET /question/:num:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// POST /next
-app.post('/next', async (req, res) => {
+// 3) GET /results/:num → Returns question details + vote counts for question # :num
+app.get('/results/:num', async (req, res) => {
   try {
-    console.log("Received POST /next");
-    // 1) Find the current active question
-    const filterFormula = encodeURIComponent('{Active Question}');
-    const currentResponse = await fetch(`${AIRTABLE_URL}?filterByFormula=${filterFormula}`, {
-      headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` },
-    });
-    const currentData = await currentResponse.json();
+    const questionNum = req.params.num;
 
-    if (currentData.error) {
-      console.error("Airtable responded with an error (currentData):", currentData.error);
-      return res.status(500).json({ error: currentData.error });
+    // First, find the Quiz record by question number
+    const filterFormula = encodeURIComponent(`{Question Number} = ${questionNum}`);
+    const quizData = await airtableFetch(`${QUIZ_TABLE}?filterByFormula=${filterFormula}`);
+    if (!quizData.records || !quizData.records.length) {
+      return res.status(404).json({ error: 'Question not found' });
     }
+    const quizRecord = quizData.records[0];
+    const quizFields = quizRecord.fields;
+    const questionId = quizRecord.id;
 
-    // Prepare batch to uncheck current active
-    const updates = [];
-    if (currentData.records && currentData.records.length) {
-      for (let rec of currentData.records) {
-        updates.push({
-          id: rec.id,
-          fields: { 'Active Question': false },
-        });
+    // Next, fetch all Votes linked to this question
+    // We'll filter the Votes table: {Question} contains questionId
+    // If {Question} is a linked-record array, we can do:
+    const votesFilter = encodeURIComponent(`SEARCH("${questionId}", ARRAYJOIN({Question}))`);
+    const votesData = await airtableFetch(`${VOTES_TABLE}?filterByFormula=${votesFilter}`);
+
+    // Tally the votes by "Vote" field
+    const counts = { '1': 0, '2': 0, '3': 0, '4': 0 };
+    for (const v of (votesData.records || [])) {
+      const voteVal = v.fields['Vote'];
+      if (voteVal && counts[voteVal] !== undefined) {
+        counts[voteVal]++;
       }
     }
 
-    // 2) Find all quiz records
-    const allResponse = await fetch(AIRTABLE_URL, {
-      headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` },
+    // Return aggregated info
+    res.json({
+      questionNumber: quizFields['Question Number'],
+      question: quizFields['Question'],
+      answers: {
+        '1': quizFields['Answer 1'] || '',
+        '2': quizFields['Answer 2'] || '',
+        '3': quizFields['Answer 3'] || '',
+        '4': quizFields['Answer 4'] || ''
+      },
+      correctAnswer: quizFields['Correct Answer'] || '',
+      results: counts
     });
-    const allData = await allResponse.json();
-
-    if (allData.error) {
-      console.error("Airtable responded with an error (allData):", allData.error);
-      return res.status(500).json({ error: allData.error });
-    }
-
-    // 3) Pick the first record that is not active to be the new active
-    const nextRecord = allData.records.find(r => !r.fields['Active Question']);
-    if (nextRecord) {
-      updates.push({
-        id: nextRecord.id,
-        fields: { 'Active Question': true },
-      });
-      console.log("Will set next record active:", nextRecord.id);
-    }
-
-    // 4) Perform the batch update if there's anything to update
-    if (updates.length > 0) {
-      console.log("Sending PATCH to Airtable:", updates);
-      const patchResponse = await fetch(AIRTABLE_URL, {
-        method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${AIRTABLE_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ records: updates }),
-      });
-      const patchData = await patchResponse.json();
-      if (patchData.error) {
-        console.error("Airtable responded with an error (patchData):", patchData.error);
-        return res.status(500).json({ error: patchData.error });
-      }
-    } else {
-      console.log("No records found to update!");
-    }
-
-    // Return success
-    if (nextRecord) {
-      res.json({ newActive: nextRecord.id });
-    } else {
-      res.json({ message: 'No next question found' });
-    }
   } catch (error) {
-    console.error("Error in POST /next:", error);
+    console.error('Error in GET /results/:num:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Start the server
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log(`Quiz server listening on port ${PORT}`);
 });
