@@ -1,7 +1,9 @@
 // server.js
 const express = require('express');
-const fetch = require('node-fetch');
+// IMPORTANT: Use the .default import if using node-fetch v3. For v2, it's simply require('node-fetch'):
+const fetch = require('node-fetch'); // For node-fetch v2
 const cors = require('cors');
+
 
 // Log basic info about env vars (true/false instead of printing secret)
 console.log("Has AIRTABLE_API_KEY?", !!process.env.AIRTABLE_API_KEY);
