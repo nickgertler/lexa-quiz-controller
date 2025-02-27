@@ -293,6 +293,41 @@ app.get('/results/:num', async (req, res) => {
   }
 });
 
+/**
+ * GET /question/:num
+ * Returns the question text and answers for question # :num
+ */
+app.get('/question/:num', async (req, res) => {
+  try {
+    const questionNum = req.params.num;
+    // Filter for {Question Number} = questionNum
+    const filter = encodeURIComponent(`{Question Number} = ${questionNum}`);
+    const quizData = await airtableFetch(`${QUIZ_TABLE}?filterByFormula=${filter}`);
+
+    if (!quizData.records.length) {
+      return res.status(404).json({ error: 'Question not found' });
+    }
+    const record = quizData.records[0];
+    const f = record.fields;
+
+    // Return basic question data, no vote tallies
+    res.json({
+      questionNumber: f['Question Number'],
+      question: f['Question'],
+      answers: {
+        '1': f['Answer 1'] || '',
+        '2': f['Answer 2'] || '',
+        '3': f['Answer 3'] || '',
+        '4': f['Answer 4'] || ''
+      },
+      correctAnswer: f['Correct Answer'] || '' // you can omit if you prefer
+    });
+  } catch (err) {
+    console.error('Error in GET /question/:num:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /* -----------------------------------------------------------------------
  *  Start the server
  */
