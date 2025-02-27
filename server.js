@@ -253,7 +253,47 @@ app.post('/vote', async (req, res) => {
   }
 });
 
-/** -----------------------------------------------------------------------
+// Add the results endpoint here before starting the server:
+
+app.get('/results/:num', async (req, res) => {
+  try {
+    const questionNum = req.params.num;
+    // 1) Find the quiz record by {Question Number} = questionNum
+    const filterFormula = encodeURIComponent(`{Question Number} = ${questionNum}`);
+    const quizData = await airtableFetch(`${QUIZ_TABLE}?filterByFormula=${filterFormula}`);
+    if (!quizData.records.length) {
+      return res.status(404).json({ error: 'Question not found' });
+    }
+
+    const quizRecord = quizData.records[0];
+    const qFields = quizRecord.fields;
+
+    // If you have rollup fields "a1 Votes", "a2 Votes" etc.:
+    res.json({
+      questionNumber: qFields['Question Number'] || 0,
+      question: qFields['Question'] || '',
+      answers: {
+        '1': qFields['Answer 1'] || '',
+        '2': qFields['Answer 2'] || '',
+        '3': qFields['Answer 3'] || '',
+        '4': qFields['Answer 4'] || ''
+      },
+      correctAnswer: qFields['Correct Answer'] || '',
+      votes: {
+        '1': qFields['a1 Votes'] || 0,
+        '2': qFields['a2 Votes'] || 0,
+        '3': qFields['a3 Votes'] || 0,
+        '4': qFields['a4 Votes'] || 0
+      }
+    });
+
+  } catch (err) {
+    console.error('Error in GET /results/:num:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* -----------------------------------------------------------------------
  *  Start the server
  */
 const PORT = process.env.PORT || 3000;
